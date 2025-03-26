@@ -10,15 +10,17 @@ uses
   Winapi.Windows,
   System.SysUtils, System.Classes, System.Actions, System.UITypes, System.Rtti,
   Vcl.ActnList, Vcl.Menus, Vcl.Dialogs, Vcl.ActnPopup,
-  ToolsAPI;
+  ToolsAPI, DockForm;
 
 type
-  TMenuManager = class
+  TEditorMenuManager = class(TComponent)
   private
     FActionList: TActionList;
     FecToggleComment: TAction;
     FElideActionList: TActionList;
+    FLocalMenu: TPopupMenu;
     FMsgResult: Integer;
+    FNotifierID: Integer;
     FRegistered: Boolean;
     FSaveEditorPopupMenuPopup: TNotifyEvent;
     FSaveStateChange: TNotifyEvent;
@@ -28,106 +30,113 @@ type
     procedure LogMessage(const AMessage: string);
     procedure SetecToggleComment(const Value: TAction);
     procedure SetElideActionList(const Value: TActionList);
+    procedure SetLocalMenu(const Value: TPopupMenu);
     procedure SetTestAction(const Value: TAction);
     procedure TestActionExecute(Sender: TObject);
     procedure TestActionUpdate(Sender: TObject);
-
   public
-    constructor Create;
+    constructor Create(AOwner: TComponent); override;
     destructor Destroy; override;
+    procedure DoRegister;
+    procedure DoUnregister;
     property ecToggleComment: TAction read FecToggleComment write SetecToggleComment;
     property ElideActionList: TActionList read FElideActionList write SetElideActionList;
+    property LocalMenu: TPopupMenu read FLocalMenu write SetLocalMenu;
     property TestAction: TAction read FTestAction write SetTestAction;
   end;
 
 type
-  TIDEWizard = class(TNotifierObject, IOTAWizard)
+  TEditServicesNotifier = class(TNotifierObject, INTAEditServicesNotifier)
   private
-    FMenuManager: TMenuManager;
+    FMenuManager: TEditorMenuManager;
+  protected
+    procedure WindowShow(const EditWindow: INTAEditWindow; Show, LoadedFromDesktop: Boolean);
+    procedure WindowNotification(const EditWindow: INTAEditWindow; Operation: TOperation);
+    procedure WindowActivated(const EditWindow: INTAEditWindow);
+    procedure WindowCommand(const EditWindow: INTAEditWindow; Command, Param: Integer; var Handled: Boolean);
+    procedure EditorViewActivated(const EditWindow: INTAEditWindow; const EditView: IOTAEditView);
+    procedure EditorViewModified(const EditWindow: INTAEditWindow; const EditView: IOTAEditView);
+    procedure DockFormVisibleChanged(const EditWindow: INTAEditWindow; DockForm: TDockableForm);
+    procedure DockFormUpdated(const EditWindow: INTAEditWindow; DockForm: TDockableForm);
+    procedure DockFormRefresh(const EditWindow: INTAEditWindow; DockForm: TDockableForm);
+  public
+    constructor Create(AMenuManager: TEditorMenuManager);
+  end;
+
+type
+  TMagician = class
+  strict private
+  class var
+    FInstance: TMagician;
+  private
+    FMenuManager: TEditorMenuManager;
   public
     constructor Create;
     destructor Destroy; override;
-    function GetIDString: string;
-    procedure Execute;
-    function GetName: string;
-    function GetState: TWizardState;
+    class procedure CreateInstance;
+    class procedure DestroyInstance;
   end;
 
 procedure Register;
 begin
-  RegisterPackageWizard(TIDEWizard.Create);
+  TMagician.CreateInstance;
 end;
 
-constructor TIDEWizard.Create;
-begin
-  FMenuManager := TMenuManager.Create;
-end;
-
-destructor TIDEWizard.Destroy;
-begin
-  // It is important to free FMenuManager when the package is unloaded because
-  // it will unregister its action list in the destructor which is required.
-  FreeAndNil(FMenuManager);
-  inherited;
-end;
-
-procedure TIDEWizard.Execute;
-begin
-end;
-
-function TIDEWizard.GetIDString: string;
-begin
-  Result := '[44B2E446-97C5-4D7D-918E-18FBC29D8B5E]';
-end;
-
-function TIDEWizard.GetName: string;
-begin
-  Result := 'Editor.LocalMenu.Demo';
-end;
-
-function TIDEWizard.GetState: TWizardState;
-begin
-  Result := [wsEnabled];
-end;
-
-constructor TMenuManager.Create;
-var
-  editorServices: IOTAEditorServices;
+constructor TEditorMenuManager.Create(AOwner: TComponent);
 begin
   inherited;
-
   FActionList := TActionList.Create(nil);
   TestAction := TAction.Create(nil);
-
-  if Supports(BorlandIDEServices, IOTAEditorServices, editorServices) then begin
-    var P := editorServices.TopView.GetEditWindow.Form.FindComponent('EditorLocalMenu') as TPopupActionBar;
-    FSaveEditorPopupMenuPopup := P.OnPopup;
-    P.OnPopup := EditorPopupMenuPopup;
-    FRegistered := True;
-  end;
-
   FMsgResult := mrNone;
+  DoRegister;
 end;
 
-destructor TMenuManager.Destroy;
-var
-  editorServices: IOTAEditorServices;
+destructor TEditorMenuManager.Destroy;
 begin
   TestAction := nil;
   ElideActionList := nil;
   ecToggleComment := nil;
-  if FRegistered then begin
-    if Supports(BorlandIDEServices, IOTAEditorServices, editorServices) then begin
-      var P := editorServices.TopView.GetEditWindow.Form.FindComponent('EditorLocalMenu') as TPopupActionBar;
-      P.OnPopup := FSaveEditorPopupMenuPopup;
-      FRegistered := False;
-    end;
-  end;
+  DoUnregister;
   FreeAndNil(FActionList);
   inherited;
 end;
 
-procedure TMenuManager.EditorPopupMenuPopup(Sender: TObject);
+procedure TEditorMenuManager.DoRegister;
+var
+  editorServices: IOTAEditorServices;
+begin
+  if FRegistered then Exit;
+
+  if Supports(BorlandIDEServices, IOTAEditorServices, editorServices) then begin
+    if editorServices.TopView = nil then begin
+      if FNotifierID = 0 then begin
+        FNotifierID := editorServices.AddNotifier(TEditServicesNotifier.Create(Self));
+      end;
+      Exit;
+    end;
+    LocalMenu := editorServices.TopView.GetEditWindow.Form.FindComponent('EditorLocalMenu') as TPopupActionBar;
+    FRegistered := True;
+  end;
+end;
+
+procedure TEditorMenuManager.DoUnregister;
+var
+  editorServices: IOTAEditorServices;
+begin
+  if Supports(BorlandIDEServices, IOTAEditorServices, editorServices) then begin
+    if FNotifierID <> 0 then begin
+      editorServices.RemoveNotifier(FNotifierID);
+      FNotifierID := 0;
+    end;
+  end;
+
+  if not FRegistered then Exit;
+
+  LocalMenu := nil;
+  FRegistered := False;
+end;
+
+procedure TEditorMenuManager.EditorPopupMenuPopup(Sender: TObject);
 var
   item: TMenuItem;
 begin
@@ -163,14 +172,14 @@ begin
 
 end;
 
-procedure TMenuManager.ElideStateChange(Sender: TObject);
+procedure TEditorMenuManager.ElideStateChange(Sender: TObject);
 begin
   var state := (Sender as TActionList).State;
   var msg := 'ElideActionList state change to ' + TRttiEnumerationType.GetName(state);
   LogMessage(msg);
 end;
 
-procedure TMenuManager.LogMessage(const AMessage: string);
+procedure TEditorMenuManager.LogMessage(const AMessage: string);
 var
   msgServices: IOTAMessageServices;
 begin
@@ -178,7 +187,7 @@ begin
     msgServices.AddTitleMessage(AMessage);
 end;
 
-procedure TMenuManager.SetecToggleComment(const Value: TAction);
+procedure TEditorMenuManager.SetecToggleComment(const Value: TAction);
 begin
   if FecToggleComment <> Value then
   begin
@@ -186,7 +195,7 @@ begin
   end;
 end;
 
-procedure TMenuManager.SetElideActionList(const Value: TActionList);
+procedure TEditorMenuManager.SetElideActionList(const Value: TActionList);
 begin
   if FElideActionList <> Value then
   begin
@@ -201,7 +210,22 @@ begin
   end;
 end;
 
-procedure TMenuManager.SetTestAction(const Value: TAction);
+procedure TEditorMenuManager.SetLocalMenu(const Value: TPopupMenu);
+begin
+  if FLocalMenu <> Value then
+  begin
+    if FLocalMenu <> nil then begin
+      FLocalMenu.OnPopup := FSaveEditorPopupMenuPopup;
+    end;
+    FLocalMenu := Value;
+    if FLocalMenu <> nil then begin
+      FSaveEditorPopupMenuPopup := FLocalMenu.OnPopup;
+      FLocalMenu.OnPopup := EditorPopupMenuPopup;
+    end;
+  end;
+end;
+
+procedure TEditorMenuManager.SetTestAction(const Value: TAction);
 begin
   if FTestAction <> Value then begin
     FTestAction.Free;
@@ -215,7 +239,7 @@ begin
   end;
 end;
 
-procedure TMenuManager.TestActionExecute(Sender: TObject);
+procedure TEditorMenuManager.TestActionExecute(Sender: TObject);
 begin
   if ecToggleComment.Suspended then begin
     if FMsgResult <> mrNone then begin
@@ -237,9 +261,82 @@ begin
   end;
 end;
 
-procedure TMenuManager.TestActionUpdate(Sender: TObject);
+procedure TEditorMenuManager.TestActionUpdate(Sender: TObject);
 begin
   (Sender as TAction).Enabled := (ElideActionList <> nil) and (ecToggleComment <> nil) and ecToggleComment.Suspended;
 end;
 
+constructor TEditServicesNotifier.Create(AMenuManager: TEditorMenuManager);
+begin
+  inherited Create;
+  FMenuManager := AMenuManager;
+end;
+
+procedure TEditServicesNotifier.DockFormRefresh(const EditWindow: INTAEditWindow; DockForm: TDockableForm);
+begin
+end;
+
+procedure TEditServicesNotifier.DockFormUpdated(const EditWindow: INTAEditWindow; DockForm: TDockableForm);
+begin
+end;
+
+procedure TEditServicesNotifier.DockFormVisibleChanged(const EditWindow: INTAEditWindow; DockForm: TDockableForm);
+begin
+end;
+
+procedure TEditServicesNotifier.EditorViewActivated(const EditWindow: INTAEditWindow; const EditView: IOTAEditView);
+begin
+end;
+
+procedure TEditServicesNotifier.EditorViewModified(const EditWindow: INTAEditWindow; const EditView: IOTAEditView);
+begin
+end;
+
+procedure TEditServicesNotifier.WindowActivated(const EditWindow: INTAEditWindow);
+begin
+
+end;
+
+procedure TEditServicesNotifier.WindowCommand(const EditWindow: INTAEditWindow; Command, Param: Integer; var Handled: Boolean);
+begin
+end;
+
+procedure TEditServicesNotifier.WindowNotification(const EditWindow: INTAEditWindow; Operation: TOperation);
+begin
+  case Operation of
+    opInsert: FMenuManager.DoRegister;
+    opRemove: ;
+  end;
+end;
+
+procedure TEditServicesNotifier.WindowShow(const EditWindow: INTAEditWindow; Show, LoadedFromDesktop: Boolean);
+begin
+end;
+
+constructor TMagician.Create;
+begin
+  inherited;
+  FMenuManager := TEditorMenuManager.Create(nil);
+end;
+
+destructor TMagician.Destroy;
+begin
+  FMenuManager.Free;
+  FMenuManager := nil;
+  inherited;
+end;
+
+class procedure TMagician.CreateInstance;
+begin
+  FInstance := TMagician.Create;
+end;
+
+class procedure TMagician.DestroyInstance;
+begin
+  FInstance.Free;
+end;
+
+initialization
+finalization
+  TMagician.DestroyInstance;
 end.
